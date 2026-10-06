@@ -16,7 +16,7 @@
 sudo pacman -S mono mono-msbuild
 
 Для сборки использовать:
-msbuild Sorter.csproj
+msbuild Dihotomia.csproj
 
 Для запуска:
-mono bin/Debug/Sorter.exe
+mono bin/Debug/Dihotomia.exe
