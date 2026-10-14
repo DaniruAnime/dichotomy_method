@@ -7,14 +7,15 @@ namespace Dihotomia {
     public const int MaximumExpressionLength = 2048;
 
     private const int MaximumRecursionDepth = 128;
+    private const double TangentPoleTolerance = 1E-14;
 
     private static readonly Dictionary<string, Func<double, double>> Functions =
         new Dictionary<string, Func<double, double>>(StringComparer.OrdinalIgnoreCase)
         {
                 { "sin", Math.Sin },
                 { "cos", Math.Cos },
-                { "tan", Math.Tan },
-                { "tg", Math.Tan },
+                { "tan", SafeTangent },
+                { "tg", SafeTangent },
                 { "asin", Math.Asin },
                 { "acos", Math.Acos },
                 { "atan", Math.Atan },
@@ -25,6 +26,17 @@ namespace Dihotomia {
                 { "log", Math.Log10 },
                 { "log10", Math.Log10 },
         };
+
+    private static double SafeTangent(double argument) {
+      // Math.Tan(Math.PI / 2) дает огромное конечное число, так как pi/2
+      // невозможно представить точно. Точки, численно
+      // неотличимые от тангенса, следует считать неопределенными
+      if (Math.Abs(Math.Cos(argument)) <= TangentPoleTolerance) {
+        return double.NaN;
+      }
+
+      return Math.Tan(argument);
+    }
 
     private string text = string.Empty;
     private int position;
@@ -43,7 +55,7 @@ namespace Dihotomia {
 
     public void ValidateSyntax(string expression) {
       this.Initialize(expression, 0.0, true);
-      _ = this.ParseExpression();
+      this.ParseExpression();
       this.EnsureEndOfExpression();
     }
 
@@ -236,23 +248,23 @@ namespace Dihotomia {
         char current = this.text[this.position];
 
         if (char.IsDigit(current)) {
-          this.position++;
+          ++this.position;
           continue;
         }
 
         if ((current == '.' || current == ',') && !hasSeparator && !hasExponent) {
           hasSeparator = true;
-          this.position++;
+          ++this.position;
           continue;
         }
 
         if ((current == 'e' || current == 'E') && !hasExponent) {
           hasExponent = true;
-          this.position++;
+          ++this.position;
 
           if (this.position < this.text.Length &&
               (this.text[this.position] == '+' || this.text[this.position] == '-')) {
-            this.position++;
+            ++this.position;
           }
 
           continue;
@@ -278,7 +290,7 @@ namespace Dihotomia {
 
       while (this.position < this.text.Length &&
              (char.IsLetterOrDigit(this.text[this.position]) || this.text[this.position] == '_')) {
-        this.position++;
+        ++this.position;
       }
 
       return this.text.Substring(start, this.position - start);
@@ -286,13 +298,13 @@ namespace Dihotomia {
 
     private void SkipSpaces() {
       while (this.position < this.text.Length && char.IsWhiteSpace(this.text[this.position])) {
-        this.position++;
+        ++this.position;
       }
     }
 
     private bool Match(char expected) {
       if (this.position < this.text.Length && this.text[this.position] == expected) {
-        this.position++;
+        ++this.position;
         return true;
       }
 
@@ -300,7 +312,7 @@ namespace Dihotomia {
     }
 
     private void EnterRecursion() {
-      this.recursionDepth++;
+      ++this.recursionDepth;
 
       if (this.recursionDepth > MaximumRecursionDepth) {
         throw new FormatException("Формула содержит слишком глубокую вложенность.");

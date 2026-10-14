@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Globalization;
@@ -6,7 +7,7 @@ using System.Windows.Forms;
 
 namespace Dihotomia {
   internal sealed class PlotPanel : Panel {
-    private const int Samples = 700;
+    private const int Samples = 2048;
     private const int LeftMargin = 72;
     private const int TopMargin = 38;
     private const int RightMargin = 24;
@@ -16,21 +17,17 @@ namespace Dihotomia {
     private string functionDescription;
     private double a;
     private double b;
-    private bool hasMinimum;
-    private double minimumX;
-    private double minimumY;
-    private bool hasRoot;
-    private double rootX;
+    private IList<double> roots;
     private double[] xValues;
     private double[] yValues;
     private bool[] validValues;
     private double sampledYMin;
     private double sampledYMax;
     private bool hasDrawableSamples;
+    private bool hasSuspectedDiscontinuity;
+    private double visibleYMin;
+    private double visibleYMax;
 
-    /// <summary>
-    /// Initializes a new instance of the <see cref="PlotPanel"/> class.
-    /// </summary>
     public PlotPanel() {
       this.DoubleBuffered = true;
       this.BackColor = Color.White;
@@ -39,25 +36,23 @@ namespace Dihotomia {
       this.TabStop = false;
     }
 
+    public bool HasSuspectedDiscontinuity {
+      get { return this.hasSuspectedDiscontinuity; }
+    }
+
     public void SetPlot(
         Func<double, double> functionToPlot,
         string description,
         double leftBound,
         double rightBound,
-        double foundMinimumX,
-        double foundMinimumY,
-        bool minimumExists,
-        double foundRootX,
-        bool rootExists) {
+        IList<double> foundRoots) {
       this.function = functionToPlot;
       this.functionDescription = description ?? string.Empty;
       this.a = leftBound;
       this.b = rightBound;
-      this.minimumX = foundMinimumX;
-      this.minimumY = foundMinimumY;
-      this.hasMinimum = minimumExists;
-      this.rootX = foundRootX;
-      this.hasRoot = rootExists;
+      this.roots = foundRoots == null
+          ? new List<double>()
+          : new List<double>(foundRoots);
       this.BuildSampleCache();
       this.Invalidate();
     }
@@ -65,12 +60,14 @@ namespace Dihotomia {
     public void ClearPlot() {
       this.function = null;
       this.functionDescription = string.Empty;
-      this.hasMinimum = false;
-      this.hasRoot = false;
+      this.roots = null;
       this.xValues = null;
       this.yValues = null;
       this.validValues = null;
       this.hasDrawableSamples = false;
+      this.hasSuspectedDiscontinuity = false;
+      this.visibleYMin = 0.0;
+      this.visibleYMax = 0.0;
       this.sampledYMin = 0.0;
       this.sampledYMax = 0.0;
       this.Invalidate();
@@ -95,7 +92,7 @@ namespace Dihotomia {
       if (this.function == null || this.b <= this.a || area.Width < 40 || area.Height < 40) {
         this.DrawStatusText(
             graphics,
-            "После расчёта здесь появится график функции и найденная точка минимума.",
+            "После расчёта здесь появится график функции и обнаруженные корни.",
             Color.DimGray);
         return;
       }
@@ -116,15 +113,10 @@ namespace Dihotomia {
         return;
       }
 
-      double yMin = this.sampledYMin;
-      double yMax = this.sampledYMax;
+      double yMin = this.visibleYMin;
+      double yMax = this.visibleYMax;
 
-      if (this.hasMinimum && IsDrawableValue(this.minimumY)) {
-        yMin = Math.Min(yMin, this.minimumY);
-        yMax = Math.Max(yMax, this.minimumY);
-      }
-
-      if (this.hasRoot) {
+      if (this.roots != null && this.roots.Count > 0) {
         yMin = Math.Min(yMin, 0.0);
         yMax = Math.Max(yMax, 0.0);
       }
@@ -158,8 +150,7 @@ namespace Dihotomia {
       this.DrawGrid(graphics, area);
       this.DrawAxes(graphics, area, normalizedMin, normalizedMax, mapX, mapY);
       this.DrawCurve(graphics, area, mapX, mapY);
-      this.DrawRoot(graphics, area, normalizedMin, normalizedMax, mapX, mapY);
-      this.DrawMinimum(graphics, area, mapX, mapY);
+      this.DrawRoots(graphics, area, normalizedMin, normalizedMax, mapX, mapY);
       this.DrawLabels(graphics, area, displayYMin, displayYMax);
     }
 
@@ -236,6 +227,9 @@ namespace Dihotomia {
       this.hasDrawableSamples = false;
       this.sampledYMin = double.PositiveInfinity;
       this.sampledYMax = double.NegativeInfinity;
+      this.visibleYMin = 0.0;
+      this.visibleYMax = 0.0;
+      this.hasSuspectedDiscontinuity = false;
 
       if (this.function == null || this.b <= this.a) {
         return;
@@ -246,7 +240,7 @@ namespace Dihotomia {
         return;
       }
 
-      for (int index = 0; index <= Samples; index++) {
+      for (int index = 0; index <= Samples; ++index) {
         double x = index == Samples
             ? this.b
             : this.a + (intervalLength * ((double)index / Samples));
@@ -271,11 +265,71 @@ namespace Dihotomia {
           this.validValues[index] = false;
         }
       }
+
+      this.PrepareVisibleRange();
+    }
+
+    private void PrepareVisibleRange() {
+      if (!this.hasDrawableSamples) {
+        return;
+      }
+
+      this.visibleYMin = this.sampledYMin;
+      this.visibleYMax = this.sampledYMax;
+
+      int validCount = 0;
+      for (int index = 0; index < this.validValues.Length; ++index) {
+        if (this.validValues[index]) {
+          ++validCount;
+        }
+      }
+
+      if (validCount < 16) {
+        return;
+      }
+
+      double[] sorted = new double[validCount];
+      int next = 0;
+      for (int index = 0; index < this.validValues.Length; ++index) {
+        if (this.validValues[index]) {
+          sorted[++next] = this.yValues[index];
+        }
+      }
+
+      Array.Sort(sorted);
+      double lower = sorted[(int)((validCount - 1) * 0.025)];
+      double upper = sorted[(int)((validCount - 1) * 0.975)];
+      double typicalMagnitude = Math.Max(Math.Abs(lower), Math.Abs(upper));
+      double extremeMagnitude = Math.Max(
+          Math.Abs(this.sampledYMin),
+          Math.Abs(this.sampledYMax));
+
+      if (!(typicalMagnitude > 0.0) ||
+          !(extremeMagnitude / typicalMagnitude > 8.0)) {
+        return;
+      }
+
+      for (int index = 1; index < this.validValues.Length; ++index) {
+        if (!this.validValues[index - 1] || !this.validValues[index]) {
+          continue;
+        }
+
+        double previous = this.yValues[index - 1];
+        double current = this.yValues[index];
+        if (((previous > 0.0 && current < 0.0) ||
+             (previous < 0.0 && current > 0.0)) &&
+            Math.Abs(previous / typicalMagnitude - current / typicalMagnitude) > 2.0) {
+          this.hasSuspectedDiscontinuity = true;
+          this.visibleYMin = lower;
+          this.visibleYMax = upper;
+          return;
+        }
+      }
     }
 
     private void DrawGrid(Graphics graphics, Rectangle area) {
       using (Pen gridPen = new Pen(Color.FromArgb(235, 235, 235), 1.0F)) {
-        for (int index = 1; index < 5; index++) {
+        for (int index = 1; index < 5; ++index) {
           float x = area.Left + ((area.Width * index) / 5.0F);
           float y = area.Top + ((area.Height * index) / 5.0F);
           graphics.DrawLine(gridPen, x, area.Top, x, area.Bottom);
@@ -317,76 +371,173 @@ namespace Dihotomia {
         return;
       }
 
-      using (Pen curvePen = new Pen(Color.RoyalBlue, 2.0F)) {
-        PointF? previous = null;
+      // Не допускайте, чтобы слишком большие значения вблизи вертикальных
+      // асимптот выходили за пределы области построения графика
+      GraphicsState state = graphics.Save();
+      graphics.SetClip(area);
+      try {
+        using (Pen curvePen = new Pen(Color.RoyalBlue, 2.0F)) {
+          PointF? previous = null;
+          int previousIndex = -1;
 
-        for (int index = 0; index <= Samples; index++) {
-          if (!this.validValues[index]) {
-            previous = null;
-            continue;
+          for (int index = 0; index <= Samples; ++index) {
+            if (!this.validValues[index]) {
+              previous = null;
+              previousIndex = -1;
+              continue;
+            }
+
+            float screenX = mapX(this.xValues[index]);
+            float screenY = mapY(this.yValues[index]);
+            if (!IsFinite(screenX) || !IsFinite(screenY)) {
+              previous = null;
+              previousIndex = -1;
+              continue;
+            }
+
+            PointF current = new PointF(screenX, screenY);
+            if (previous.HasValue && previousIndex == index - 1 &&
+                this.IsContinuousSegment(previousIndex, index, previous.Value.Y, screenY, area, mapY)) {
+              PointF clippedStart;
+              PointF clippedEnd;
+              if (TryClipSegment(area, previous.Value, current, out clippedStart, out clippedEnd)) {
+                graphics.DrawLine(curvePen, clippedStart, clippedEnd);
+              }
+            }
+
+            previous = current;
+            previousIndex = index;
           }
-
-          float screenX = mapX(this.xValues[index]);
-          float screenY = mapY(this.yValues[index]);
-          if (!IsFinite(screenX) || !IsFinite(screenY)) {
-            previous = null;
-            continue;
-          }
-
-          PointF current = new PointF(screenX, screenY);
-
-          if (previous.HasValue &&
-              Math.Abs(current.Y - previous.Value.Y) < (area.Height * 0.8F)) {
-            graphics.DrawLine(curvePen, previous.Value, current);
-          }
-
-          previous = current;
         }
+      }
+      finally {
+        graphics.Restore(state);
       }
     }
 
-    private void DrawRoot(
+    private bool IsContinuousSegment(
+        int previousIndex,
+        int currentIndex,
+        float previousScreenY,
+        float currentScreenY,
+        Rectangle area,
+        Func<double, float> mapY) {
+      // Обычные гладкие сегменты не требуют дополнительных вычислений
+      if (Math.Abs((double)currentScreenY - previousScreenY) < area.Height * 0.2) {
+        return true;
+      }
+
+      // Большой скачок может быть как непрерывным крутым склоном, так и асимптотой.
+      // Проверяет внутреннюю точку отрезка перед соединением вершин. Это также работает
+      // когда полюс (особая точка) лежит между координатами отсчетов, где Math.Tan 
+      // возвращает конечные значения на обоих концах интервала
+      double left = this.xValues[previousIndex];
+      double right = this.xValues[currentIndex];
+      double middle = left + ((right - left) / 2.0);
+      if (!(middle > left && middle < right)) {
+        return false;
+      }
+
+      try {
+        double middleY = this.function(middle);
+        float middleScreenY = mapY(middleY);
+        if (!IsFinite(middleScreenY)) {
+          return false;
+        }
+
+        double interpolatedY = ((double)previousScreenY + currentScreenY) / 2.0;
+        return Math.Abs(middleScreenY - interpolatedY) <=
+            Math.Max(18.0, area.Height * 0.12);
+      }
+      catch (ArithmeticException) {
+        return false;
+      }
+      catch (FormatException) {
+        return false;
+      }
+    }
+
+    private static bool TryClipSegment(
+        Rectangle area,
+        PointF start,
+        PointF end,
+        out PointF clippedStart,
+        out PointF clippedEnd) {
+      clippedStart = PointF.Empty;
+      clippedEnd = PointF.Empty;
+      double dx = (double)end.X - start.X;
+      double dy = (double)end.Y - start.Y;
+      double first = 0.0;
+      double last = 1.0;
+
+      if (!ClipTest(-dx, start.X - area.Left, ref first, ref last) ||
+          !ClipTest(dx, area.Right - start.X, ref first, ref last) ||
+          !ClipTest(-dy, start.Y - area.Top, ref first, ref last) ||
+          !ClipTest(dy, area.Bottom - start.Y, ref first, ref last)) {
+        return false;
+      }
+
+      clippedStart = new PointF(
+          (float)Math.Max(area.Left, Math.Min(area.Right, start.X + (first * dx))),
+          (float)Math.Max(area.Top, Math.Min(area.Bottom, start.Y + (first * dy))));
+      clippedEnd = new PointF(
+          (float)Math.Max(area.Left, Math.Min(area.Right, start.X + (last * dx))),
+          (float)Math.Max(area.Top, Math.Min(area.Bottom, start.Y + (last * dy))));
+      return true;
+    }
+
+    private static bool ClipTest(double direction, double distance, ref double first, ref double last) {
+      if (direction == 0.0) {
+        return distance >= 0.0;
+      }
+
+      double ratio = distance / direction;
+      if (direction < 0.0) {
+        if (ratio > last) {
+          return false;
+        }
+
+        first = Math.Max(first, ratio);
+      } else {
+        if (ratio < first) {
+          return false;
+        }
+
+        last = Math.Min(last, ratio);
+      }
+
+      return true;
+    }
+
+    private void DrawRoots(
         Graphics graphics,
         Rectangle area,
         double normalizedMin,
         double normalizedMax,
         Func<double, float> mapX,
         Func<double, float> mapY) {
-      if (!this.hasRoot || normalizedMin > 0.0 || normalizedMax < 0.0) {
+      if (this.roots == null || this.roots.Count == 0 ||
+          normalizedMin > 0.0 || normalizedMax < 0.0) {
         return;
       }
 
-      float rootScreenX = mapX(this.rootX);
       float rootScreenY = mapY(0.0);
-      if (!IsPointInside(area, rootScreenX, rootScreenY)) {
+      if (!IsFinite(rootScreenY)) {
         return;
       }
 
       using (Brush brush = new SolidBrush(Color.DarkGreen)) {
-        graphics.FillEllipse(brush, rootScreenX - 5, rootScreenY - 5, 10, 10);
-        this.DrawMarkerLabel(graphics, area, rootScreenX, rootScreenY, "корень", brush);
-      }
-    }
+        for (int index = 0; index < this.roots.Count; ++index) {
+          float rootScreenX = mapX(this.roots[index]);
+          if (!IsPointInside(area, rootScreenX, rootScreenY)) {
+            continue;
+          }
 
-    private void DrawMinimum(
-        Graphics graphics,
-        Rectangle area,
-        Func<double, float> mapX,
-        Func<double, float> mapY) {
-      if (!this.hasMinimum || !IsDrawableValue(this.minimumY)) {
-        return;
-      }
-
-      float minimumScreenX = mapX(this.minimumX);
-      float minimumScreenY = mapY(this.minimumY);
-
-      if (!IsPointInside(area, minimumScreenX, minimumScreenY)) {
-        return;
-      }
-
-      using (Brush brush = new SolidBrush(Color.Crimson)) {
-        graphics.FillEllipse(brush, minimumScreenX - 6, minimumScreenY - 6, 12, 12);
-        this.DrawMarkerLabel(graphics, area, minimumScreenX, minimumScreenY, "минимум", brush);
+          graphics.FillEllipse(brush, rootScreenX - 5, rootScreenY - 5, 10, 10);
+          if (this.roots.Count == 1) {
+            this.DrawMarkerLabel(graphics, area, rootScreenX, rootScreenY, "корень", brush);
+          }
+        }
       }
     }
 
@@ -470,7 +621,8 @@ namespace Dihotomia {
     }
 
     private void DrawFunctionCaption(Graphics graphics, Rectangle area) {
-      string text = "f(x) = " + this.functionDescription;
+      string text = "f(x) = " + this.functionDescription +
+          (this.roots != null && this.roots.Count > 1 ? "   •   зелёные точки — корни" : string.Empty);
       RectangleF captionArea = new RectangleF(
           area.Left,
           8.0F,
